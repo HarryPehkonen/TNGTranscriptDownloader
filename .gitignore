@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded transcripts -- copyright chakoteya.net / Paramount Skydance.
+# Personal-use downloads, deliberately not redistributed via this repo.
+Season */
+
+# Claude Code workspace settings
+.claude/
