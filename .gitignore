@@ -221,5 +221,11 @@ __marimo__/
 # Personal-use downloads, deliberately not redistributed via this repo.
 Season */
 
+# Build artifact: regenerated from the transcripts by build_line_counts.py,
+# and it embeds transcript-derived data.
+tng_data.db
+tng_data.db-wal
+tng_data.db-shm
+
 # Claude Code workspace settings
 .claude/

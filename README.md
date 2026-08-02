@@ -1,34 +1,95 @@
 # TNGTranscriptDownloader
 
 Downloads transcripts of *Star Trek: The Next Generation* episodes from
-[chakoteya.net](http://www.chakoteya.net/NextGen/episodes.htm) and files them by
-**broadcast** season and episode.
+[chakoteya.net](http://www.chakoteya.net/NextGen/episodes.htm), files them by
+**broadcast** season and episode, and builds a SQLite database of how many
+lines each character speaks in each episode.
 
 ```
 Season 1/TNG_S1E01-E02.txt
 Season 1/TNG_S1E03.txt
 ...
 Season 7/TNG_S7E25-E26.txt
+tng_data.db
 ```
 
-176 transcript pages cover all 178 broadcast episodes.
+176 transcript pages cover all 178 broadcast episodes and 63,459 lines of
+dialogue from 784 distinct speakers.
 
-## Usage
+## Quick start
 
 ```bash
 pip install requests beautifulsoup4
+./build_all.sh
+```
 
+That's the whole pipeline. It takes about 10 minutes the first time, almost
+all of it waiting politely between HTTP requests.
+
+Both stages are safe to re-run. Transcripts already on disk are skipped and the
+database is upserted, so if a run is interrupted — or a download fails — just
+run `./build_all.sh` again and it picks up where it left off.
+
+```
+./build_all.sh --help
+
+  --delay SECONDS   Seconds to wait between HTTP requests (default: 2)
+  --out DIR         Where the "Season N" transcript directories live
+  --db PATH         SQLite database path (default: ./tng_data.db)
+  --rebuild         Drop and rebuild the database tables from scratch
+```
+
+## The two stages
+
+### 1. `download_tng_transcripts.py`
+
+```bash
 python download_tng_transcripts.py                 # everything (101-277)
 python download_tng_transcripts.py 127 148         # just season 2's page numbers
 python download_tng_transcripts.py 149             # 149 through to the end
 python download_tng_transcripts.py --out ./data --delay 5
 ```
 
-Files already on disk are skipped, so an interrupted run resumes by simply
-re-running it. `--force` re-downloads anyway. Exit status is non-zero if any
-transcript failed, and the failing numbers are listed.
+Files already on disk are skipped; `--force` re-downloads anyway. Exit status is
+non-zero if any transcript failed, and the failing numbers are listed.
 
-A full run takes about 10 minutes at the default 2-second delay.
+### 2. `build_line_counts.py`
+
+```bash
+python build_line_counts.py                        # parse and upsert
+python build_line_counts.py --rebuild              # start the tables over
+python build_line_counts.py --transcripts-dir ./data --db-path ./tng.db
+```
+
+Schema:
+
+| Table | Columns |
+|---|---|
+| `seasons` | `season_number` |
+| `episodes` | `episode_id`, `season`, `episode_number`, `episode_end`, `title`, `site_transcript_id`, `filename` |
+| `characters` | `character_id`, `character_name` |
+| `line_counts` | `episode_id`, `character_id`, `line_count` |
+| `episode_slots` | *view* — one row per broadcast episode |
+
+Example:
+
+```sql
+-- Who speaks most across the series?
+SELECT character_name, SUM(line_count) AS lines
+  FROM line_counts JOIN characters USING(character_id)
+ GROUP BY character_name ORDER BY lines DESC LIMIT 10;
+
+-- Picard's lines per season
+SELECT e.season, SUM(lc.line_count) AS lines
+  FROM line_counts lc
+  JOIN characters c USING(character_id)
+  JOIN episodes   e USING(episode_id)
+ WHERE c.character_name = 'PICARD'
+ GROUP BY e.season ORDER BY e.season;
+```
+
+Use the `episode_slots` view rather than `episodes` whenever you need a row per
+broadcast episode — see [Two pages cover two episodes each](#two-pages-cover-two-episodes-each).
 
 ## Gotchas
 
@@ -98,6 +159,16 @@ publishes, and is unambiguous — change `output_filename()`.
 S7E25–26). These are named `TNG_S1E01-E02.txt` and `TNG_S7E25-E26.txt`, and are
 roughly twice the size of a normal transcript.
 
+This matters downstream: there are 176 transcripts but 178 broadcast episodes,
+so a naive `episodes` table has no S1E02 and no S7E26, and any join over a
+complete episode list silently drops them. `episodes.episode_end` records the
+range each transcript covers, and the `episode_slots` view expands it:
+
+```sql
+SELECT ep.title FROM episode_slots sl JOIN episodes ep USING(episode_id)
+ WHERE sl.season = 1 AND sl.episode_number = 2;   -- Encounter at Farpoint
+```
+
 ### Page 147 is malformed HTML
 
 `147.htm` ("Peak Performance") has an unterminated attribute in its `<meta>` tag:
@@ -142,6 +213,60 @@ extraction yielded at least 2 KB before writing, and writes through a `.part`
 file plus an atomic rename, so an interrupted run never leaves a partial file
 that the next run mistakes for a finished one.
 
+## Gotchas when parsing the transcripts
+
+These bite the second stage rather than the download, and each one produces a
+database that looks entirely reasonable until you check it against the files.
+
+### Speaker labels are not one uppercase word
+
+The obvious pattern — `^[A-Z][A-Z'-]+:` — is wrong twice over, and drops 878
+lines (1.4% of the dialogue) across 26 labels:
+
+- **It needs two characters.** `Q:` never matches, so Q vanishes entirely
+  despite speaking **560 lines**. He is the ninth most prolific speaker in the
+  series and the single largest omission this causes.
+- **It only matches one word.** `GUL EVEK`, `PICARD JR`, `RO JR`, `SIR GUY`,
+  `ONE ZERO` and a dozen others are silently skipped.
+
+A label is one or more ALL-CAPS words, optionally followed by a numeric suffix,
+a bracketed annotation (`[OC]`, `[on viewscreen]`) and/or a parenthetical.
+Verified: the current pattern matches **63,459 of 63,459** candidate lines, with
+no false positives.
+
+### Numbered speakers are separate characters
+
+`RIKER 2` appears only in "Second Chances"; `PICARD 2` only in "We'll Always
+Have Paris" and "Allegiance". In each case the transcript is labelling a genuine
+duplicate of the character, not a transcription artefact. Stripping the digits
+would merge two different people, so the suffix is kept:
+
+| Character | Lines | | Character | Lines |
+|---|---|---|---|---|
+| `PICARD` | 12,322 | | `PICARD 2` | 64 |
+| `RIKER` | 7,402 | | `RIKER 2` | 98 |
+
+Aggregate them in a query if you want the combined total.
+
+### Find the header by its separator, not by prefix matching
+
+Each transcript begins with a metadata header. Filtering it out by testing
+whether lines start with `Stardate`, `Source`, `Retrieved` and so on works until
+it doesn't. The files already contain an explicit `======` rule, so split on
+that instead.
+
+### `INSERT OR REPLACE` breaks foreign keys
+
+`episodes` has an `AUTOINCREMENT` primary key and a separate `UNIQUE (season,
+episode_number)`. SQLite resolves an `INSERT OR REPLACE` conflict by **deleting**
+the conflicting row and inserting a new one with a *new* `episode_id`. With
+`PRAGMA foreign_keys=ON` and `line_counts` referencing it, the second run of the
+script dies with `FOREIGN KEY constraint failed`; without the pragma it would
+quietly orphan every line count instead.
+
+Use `INSERT ... ON CONFLICT (...) DO UPDATE`, which updates in place and keeps
+`episode_id` stable.
+
 ## Being polite to the server
 
 chakoteya.net is a long-running fan-maintained site. The script:
@@ -162,9 +287,13 @@ AI crawlers. Please keep the delay reasonable. **Change the contact address in
 
 ## Copyright
 
-The transcripts are not in this repository, and `.gitignore` excludes the
-`Season */` output directories deliberately. *Star Trek* and related marks are
-trademarks of Paramount Skydance Corporation; the transcripts are the work of
-chakoteya.net. Download them for personal use — don't redistribute them.
+The transcripts are not in this repository. `.gitignore` deliberately excludes
+both the `Season */` output directories and `tng_data.db`, the latter because it
+is a build artifact reproducible from the transcripts and because it embeds
+transcript-derived data.
 
-Only the downloader itself is covered by this repository's LICENSE.
+*Star Trek* and related marks are trademarks of Paramount Skydance Corporation;
+the transcripts are the work of chakoteya.net. Download them for personal use —
+don't redistribute them.
+
+Only the scripts themselves are covered by this repository's LICENSE.
