@@ -31,7 +31,7 @@ A term may belong to several categories: a cloaking device is Klingon AND
 Romulan, and Khitomer is both, being a Romulan attack on a Klingon outpost.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
