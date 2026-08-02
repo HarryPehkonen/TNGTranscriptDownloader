@@ -4,9 +4,10 @@
 #
 #   1. download every TNG transcript from chakoteya.net into "Season N" dirs
 #   2. parse those transcripts into the SQLite line-count database
+#   3. count the keywords.py terms per episode into the same database
 #
-# Both steps are safe to re-run. The downloader skips transcripts already on
-# disk, and the database build upserts rather than starting over, so an
+# All three steps are safe to re-run. The downloader skips transcripts already
+# on disk, and both database builds upsert rather than starting over, so an
 # interrupted run is resumed by simply running this script again.
 
 set -euo pipefail
@@ -24,8 +25,9 @@ usage() {
     cat <<'EOF'
 Usage: ./build_all.sh [options]
 
-Downloads all 176 TNG transcripts, then builds the line-count database.
-Safe to re-run: finished downloads are skipped and the database is upserted.
+Downloads all 176 TNG transcripts, then builds the line-count and keyword
+database. Safe to re-run: finished downloads are skipped, both database
+steps upsert, and nothing is re-fetched unnecessarily.
 
 Options:
   --delay SECONDS   Seconds to wait between HTTP requests (default: 2)
@@ -77,7 +79,8 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 echo "  requests and beautifulsoup4 present"
 
-for script in download_tng_transcripts.py build_line_counts.py; do
+for script in download_tng_transcripts.py build_line_counts.py \
+              build_keywords.py keywords.py; do
     if [[ ! -f "$script" ]]; then
         echo "Error: $script not found in $HERE" >&2
         exit 1
@@ -114,12 +117,28 @@ echo
     ${REBUILD_ARGS[@]+"${REBUILD_ARGS[@]}"}
 
 # ---------------------------------------------------------------------------
+# Step 3: keyword counts (needs the episodes rows from step 2)
+# ---------------------------------------------------------------------------
+step "Populating keyword counts"
+echo
+
+"$PYTHON" build_keywords.py \
+    --transcripts-dir "$TRANSCRIPTS_DIR" \
+    --db-path "$DB_PATH" \
+    ${REBUILD_ARGS[@]+"${REBUILD_ARGS[@]}"}
+
+# ---------------------------------------------------------------------------
 step "Done"
 echo "  Transcripts: $TRANSCRIPTS_DIR/Season N/"
 echo "  Database:    $DB_PATH"
 echo
 echo "Try a query:"
+echo "  # which episode is this, again?"
 echo "  sqlite3 '$DB_PATH' \\"
-echo "    'SELECT character_name, SUM(line_count) AS lines"
-echo "       FROM line_counts JOIN characters USING(character_id)"
-echo "      GROUP BY character_name ORDER BY lines DESC LIMIT 10;'"
+echo "    \"SELECT title, season, episode_number FROM episode_index"
+echo "        WHERE title LIKE '%Darmok%';\""
+echo
+echo "  # the most Klingon-heavy episodes"
+echo "  sqlite3 '$DB_PATH' \\"
+echo "    \"SELECT season, episode_number, title, occurrences FROM category_counts"
+echo "        WHERE category_key='klingon' ORDER BY occurrences DESC LIMIT 5;\""

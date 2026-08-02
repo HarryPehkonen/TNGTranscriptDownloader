@@ -2,8 +2,8 @@
 
 Downloads transcripts of *Star Trek: The Next Generation* episodes from
 [chakoteya.net](http://www.chakoteya.net/NextGen/episodes.htm), files them by
-**broadcast** season and episode, and builds a SQLite database of how many
-lines each character speaks in each episode.
+**broadcast** season and episode, and builds a SQLite database of how many lines
+each character speaks and how often each keyword appears, per episode.
 
 ```
 Season 1/TNG_S1E01-E02.txt
@@ -26,9 +26,9 @@ pip install requests beautifulsoup4
 That's the whole pipeline. It takes about 10 minutes the first time, almost
 all of it waiting politely between HTTP requests.
 
-Both stages are safe to re-run. Transcripts already on disk are skipped and the
-database is upserted, so if a run is interrupted — or a download fails — just
-run `./build_all.sh` again and it picks up where it left off.
+All three stages are safe to re-run. Transcripts already on disk are skipped and
+both database steps upsert, so if a run is interrupted — or a download fails —
+just run `./build_all.sh` again and it picks up where it left off.
 
 ```
 ./build_all.sh --help
@@ -39,7 +39,20 @@ run `./build_all.sh` again and it picks up where it left off.
   --rebuild         Drop and rebuild the database tables from scratch
 ```
 
-## The two stages
+## Finding an episode
+
+If you know the title and want the season and episode:
+
+```sql
+SELECT title, season, episode_number FROM episode_index
+ WHERE title LIKE '%Darmok%';
+```
+
+`episode_index` is indexed `COLLATE NOCASE`, so `'the naked now'` matches, and
+it expands the two double episodes — asking for "All Good Things" returns both
+S7E25 and S7E26.
+
+## The three stages
 
 ### 1. `download_tng_transcripts.py`
 
@@ -90,6 +103,84 @@ SELECT e.season, SUM(lc.line_count) AS lines
 
 Use the `episode_slots` view rather than `episodes` whenever you need a row per
 broadcast episode — see [Two pages cover two episodes each](#two-pages-cover-two-episodes-each).
+
+### 3. `build_keywords.py`
+
+Counts every term in `keywords.py` per episode and joins the results to
+`episodes`. Requires stage 2 to have run, since it matches transcripts to the
+`episodes` rows that stage creates.
+
+```bash
+python build_keywords.py                           # count and upsert
+python build_keywords.py --rebuild                 # start the keyword tables over
+```
+
+| Table | Columns |
+|---|---|
+| `categories` | `category_id`, `category_key`, `label`, `kind` |
+| `keywords` | `keyword_id`, `canonical`, `tier`, `case_sensitive`, `needs_context` |
+| `keyword_variants` | `keyword_id`, `variant` |
+| `keyword_categories` | `keyword_id`, `category_id` |
+| `keyword_counts` | `episode_id`, `keyword_id`, `occurrences` |
+
+| View | What it gives you |
+|---|---|
+| `episode_index` | title → season/episode, doubles expanded |
+| `keyword_episode_counts` | keyword counts with names instead of ids |
+| `category_counts` | per-category totals per episode |
+
+```sql
+-- The most Klingon-heavy episodes.
+SELECT season, episode_number, title, occurrences
+  FROM category_counts WHERE category_key = 'klingon'
+ ORDER BY occurrences DESC LIMIT 5;
+
+-- Every episode that mentions the Borg at all.
+SELECT season, episode_number, title, occurrences
+  FROM keyword_episode_counts WHERE keyword = 'Borg'
+ ORDER BY occurrences DESC;
+```
+
+The taxonomy lives in `keywords.py` — data, but in Python, so there is no extra
+dependency and no file to lose. Add or re-bucket a term there and re-run;
+nothing in the counting code needs touching. Terms deleted from it are removed
+from the database on the next run.
+
+## The keyword taxonomy
+
+`keywords.py` holds 303 terms across 21 categories, every count in its
+comments measured against all 176 transcripts.
+
+| Group | Terms |
+|---|---|
+| Races and species | 75 |
+| Recurring characters | 45 (main cast excluded) |
+| Locations | 36, plus 67 individual starbases |
+| Starships | 28 |
+| Technology and concepts | 55 |
+
+Three structural decisions worth knowing:
+
+**Categories are many-to-many.** 43 terms carry more than one. A `cloaking
+device` is Klingon *and* Romulan; `Khitomer` is both, being a Romulan attack on
+a Klingon outpost; `Vulcan` is a race *and* a location. A strict tree would have
+forced a wrong answer for each of these.
+
+**Starbases are individual places.** TNG reads designations digit by digit, so
+"Starbase five one five" is Starbase 515 — 67 distinct starbases appear, mostly
+spelled out, plus four proper names (Montgomery, Earhart, Lya Three, G6) and two
+written as numerals (74 and 718). Numbers stay as words and numerals stay as
+numerals, matching how each is spoken. Short designations are prefixes of longer
+ones, so every starbase term carries a `not_followed_by` guard — without it
+"Starbase One" would also fire inside "Starbase One Three Three". Bare
+`Starbase` is guarded the other way, so generic and specific sum to exactly the
+196 mentions with no double counting.
+
+**Terms are tiered.** `marker` terms appear in few episodes and tell you an
+episode is *about* something — `Borg` in 14 episodes, `Kahless` in 4. `ambience`
+terms appear everywhere and tell you nothing about which episode you are in —
+`Starfleet` in 149 of 176, `transporter` in 126. Filter to `tier = 'marker'`
+when selecting episodes; keep both when looking at trends.
 
 ## Gotchas
 
@@ -247,6 +338,22 @@ would merge two different people, so the suffix is kept:
 | `RIKER` | 7,402 | | `RIKER 2` | 98 |
 
 Aggregate them in a query if you want the combined total.
+
+### Never use prefix wildcards when counting keywords
+
+Matching `targ*` to find the Klingon animal catches *target*, *targets* and
+*targeting* — inflating 5 real occurrences to 92 across 51 episodes, which looks
+entirely plausible in a results table. Whole-word matching only.
+
+Case does most of the disambiguation work for free: `Data` (2,877) versus `data`
+(97), `Lore` (113) versus `lore` (0). Ship names that are also English words —
+Drake, Phoenix, Cairo, Constellation — have *zero* lowercase uses, so
+capitalisation alone separates them. Only `Victory` is genuinely ambiguous (10
+capitalised, 15 lowercase); it is flagged `needs_context` and must follow
+USS/the/Starship.
+
+The transcripts also use British spellings throughout: `Traveller` appears 36
+times and `Traveler` never; likewise `energise`, not `energize`.
 
 ### Find the header by its separator, not by prefix matching
 
