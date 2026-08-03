@@ -39,10 +39,55 @@ All steps idempotent. Re-run to resume. Exit 0 on success, 1 on any failure.
 | `keywords.py` | Taxonomy data. `CATEGORIES`, `TERMS`, `Term`, `starbase_terms()` |
 | `build_keywords.py` | Keyword counter. Imports from the two above |
 | `build_credits.py` | Credits/air dates/viewership from Wikipedia wikitext |
+| `query_tng.py` | Query helper, CLI + importable module. Read-only by default |
 | `build_all.sh` | Orchestrator |
 
 `Term` fields: `canonical`, `variants`, `categories`, `tier`, `case_sensitive`,
 `needs_context`, `not_followed_by`.
+
+## Querying
+
+Use `query_tng.py`. Read-only unless `--write` / `write=True`, so an accidental
+`DELETE` fails rather than succeeding quietly.
+
+**Pass SQL via stdin, not as an argument.** A shell argument must survive two
+quoting layers, shell and SQL, and 10 episode titles contain an apostrophe
+("Captain's Holiday", "Data's Day", "Devil's Due", ...). A quoted heredoc
+removes the shell layer completely; double the apostrophe for SQL and nothing
+else:
+
+```bash
+python query_tng.py --stdin <<'SQL'
+SELECT season, episode_number FROM episodes
+ WHERE title = 'Captain''s Holiday';
+SQL
+```
+
+| Command | Effect |
+|---|---|
+| `--stdin` / `--sql-file -` | Read SQL from stdin (preferred) |
+| `--sql-file F` | Read SQL from a file |
+| `--tables` | Tables **and views** with row counts |
+| `--schema` | Full DDL, including views and indexes |
+| `--table NAME` | Dump a table or view |
+| `--format json\|csv\|table` | Output format |
+| `--all` | Remove the row cap |
+| `--write` | Allow modification |
+
+From Python (no shell, so no quoting problem at all):
+
+```python
+from query_tng import query, db_path, schema
+query("SELECT ...")                      # prints a table
+rows = query("SELECT ...", fetch='rows') # list of dicts
+n    = query("SELECT COUNT(*) ...", fetch='scalar')
+```
+
+`fetch`: `print` (default), `rows`, `raw`, `json`, `csv`, `scalar`, `none`.
+
+- CLI caps output at 100 rows; `--all` overrides. The module has no cap.
+- Multiple statements are fine; results come from the last one returning rows.
+- Errors exit 1 with one line, no traceback.
 
 ## Invariants
 
