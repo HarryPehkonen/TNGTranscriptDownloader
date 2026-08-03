@@ -229,3 +229,6 @@ tng_data.db-shm
 
 # Claude Code workspace settings
 .claude/
+
+# Wikipedia wikitext cache for build_credits.py -- refetchable, not ours.
+.wikicache/

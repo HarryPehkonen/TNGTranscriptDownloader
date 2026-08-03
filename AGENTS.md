@@ -3,8 +3,8 @@
 Machine-oriented notes. Human-facing docs are in `README.md`.
 
 Scrapes Star Trek: TNG transcripts from chakoteya.net, files them by broadcast
-season/episode, builds a SQLite database of per-episode line counts and keyword
-counts.
+season/episode, builds a SQLite database of per-episode line counts, keyword
+counts and credits.
 
 ## Setup
 
@@ -21,11 +21,12 @@ pip install requests beautifulsoup4
 
 | Command | Effect |
 |---|---|
-| `./build_all.sh` | Full pipeline: download → line counts → keyword counts |
+| `./build_all.sh` | Full pipeline: download → line counts → keywords → credits |
 | `./build_all.sh --rebuild` | Same, dropping tables first |
 | `python download_tng_transcripts.py [start] [end]` | Fetch pages 101–277 |
 | `python build_line_counts.py` | Populate `episodes`/`characters`/`line_counts` |
 | `python build_keywords.py` | Populate keyword tables (needs stage 2 first) |
+| `python build_credits.py` | Populate credits/air dates (needs stage 2 first) |
 
 All steps idempotent. Re-run to resume. Exit 0 on success, 1 on any failure.
 
@@ -37,6 +38,7 @@ All steps idempotent. Re-run to resume. Exit 0 on success, 1 on any failure.
 | `build_line_counts.py` | Dialogue parser. Exports `SPEAKER_RE`, `transcript_body` |
 | `keywords.py` | Taxonomy data. `CATEGORIES`, `TERMS`, `Term`, `starbase_terms()` |
 | `build_keywords.py` | Keyword counter. Imports from the two above |
+| `build_credits.py` | Credits/air dates/viewership from Wikipedia wikitext |
 | `build_all.sh` | Orchestrator |
 
 `Term` fields: `canonical`, `variants`, `categories`, `tier`, `case_sensitive`,
@@ -54,8 +56,29 @@ All steps idempotent. Re-run to resume. Exit 0 on success, 1 on any failure.
 | Distinct speakers | 784 |
 | Keyword terms / categories | 303 / 21 |
 | Keyword occurrences | 12,161 |
+| People / credit rows | 176 / 551 |
+| Episodes with air date / rating | 176 / 170 |
 
 If a change moves these, it is a regression unless intended.
+
+## No similarity in the schema, by design
+
+There is no `similar_episodes` table or view, and adding one is not wanted.
+"Similar" depends on the question. Write the JOIN for whichever definition the
+user states; do not assume a built-in.
+
+| Definition | Source |
+|---|---|
+| Same writer | `credits.role != 'director'` |
+| Same director | `credits.role = 'director'` |
+| Overlapping cast | `line_counts` shares per episode |
+| Shared subject | `keyword_counts` + `keywords.tier='marker'` |
+| Comparable audience | `episodes.us_viewers_millions` |
+
+These disagree. For "Darmok": same writer gives Emergence/Masks/Interface;
+shared keywords gives Skin of Evil. Writer is the strongest signal; keyword
+overlap the weakest, because a term appearing in one episode (`Tamarian`) can
+never be shared — the sharpest markers cannot drive similarity.
 
 ## Traps
 
@@ -128,13 +151,19 @@ with a new AUTOINCREMENT id, orphaning children and tripping
 them via `PRAGMA foreign_key_list` rather than hardcoding names. Adding a table
 with an FK into `episodes`/`characters`/`seasons` requires no change there.
 
+**Wikipedia has two credit templates**, `StoryTeleplay` and `WritingCredits`,
+same `s=`/`t=` shape. Resolve `[[Target|Display]]` links *before* splitting
+template params on `|`, or names corrupt. Do not anchor the template match to
+end-of-string; one episode appends prose after the closing braces.
+
 **`print()` needs `flush=True`.** Stdout is block-buffered when redirected;
 without it, progress is invisible and stderr interleaves out of order.
 
 ## Rules
 
-- **Do not commit `tng_data.db` or `Season */`.** Gitignored. Transcripts are
-  chakoteya.net's work, Paramount's copyright, personal use only.
+- **Do not commit `tng_data.db`, `Season */` or `.wikicache/`.** All gitignored.
+  Transcripts are chakoteya.net's work, Paramount's copyright, personal use
+  only. Credits come from Wikipedia; store facts only, never its summaries.
 - **Be gentle with chakoteya.net.** 2 s between requests minimum, one shared
   `requests.Session`, honest User-Agent, back off on 429/5xx and honour
   `Retry-After`, fail fast on 404. Do not bulk re-fetch what is on disk.
@@ -148,6 +177,7 @@ PRAGMA foreign_key_check;                     -- must return nothing
 SELECT COUNT(*) FROM episode_slots;           -- 178
 SELECT SUM(line_count) FROM line_counts;      -- 63459
 SELECT SUM(occurrences) FROM keyword_counts;  -- 12161
+SELECT COUNT(*) FROM credits;                 -- 551
 ```
 
 Cross-check keyword counts against the transcripts directly rather than

@@ -2,8 +2,8 @@
 
 Downloads transcripts of *Star Trek: The Next Generation* episodes from
 [chakoteya.net](http://www.chakoteya.net/NextGen/episodes.htm), files them by
-**broadcast** season and episode, and builds a SQLite database of how many lines
-each character speaks and how often each keyword appears, per episode.
+**broadcast** season and episode, and builds a SQLite database of per-episode
+line counts, keyword counts, and credits.
 
 ```
 Season 1/TNG_S1E01-E02.txt
@@ -26,8 +26,8 @@ pip install requests beautifulsoup4
 That's the whole pipeline. It takes about 10 minutes the first time, almost
 all of it waiting politely between HTTP requests.
 
-All three stages are safe to re-run. Transcripts already on disk are skipped and
-both database steps upsert, so if a run is interrupted — or a download fails —
+All four stages are safe to re-run. Transcripts already on disk are skipped and
+the three database steps upsert, so if a run is interrupted — or a download fails —
 just run `./build_all.sh` again and it picks up where it left off.
 
 ```
@@ -52,7 +52,7 @@ SELECT title, season, episode_number FROM episode_index
 it expands the two double episodes — asking for "All Good Things" returns both
 S7E25 and S7E26.
 
-## The three stages
+## The four stages
 
 ### 1. `download_tng_transcripts.py`
 
@@ -145,6 +145,67 @@ The taxonomy lives in `keywords.py` — data, but in Python, so there is no extr
 dependency and no file to lose. Add or re-bucket a term there and re-run;
 nothing in the counting code needs touching. Terms deleted from it are removed
 from the database on the next run.
+
+### 4. `build_credits.py`
+
+Adds writers, directors, air dates and US viewership from Wikipedia's
+per-season episode lists, keyed by production code so they join to transcripts
+exactly. Wikitext is cached in `.wikicache/`, so only a cold start touches the
+network — 7 requests, one per season.
+
+```bash
+python build_credits.py                            # parse and upsert
+python build_credits.py --refresh                  # re-fetch from Wikipedia
+python build_credits.py --rebuild                  # start the credit tables over
+```
+
+| Table / column | Contents |
+|---|---|
+| `people` | `person_id`, `name` — 176 people |
+| `credits` | `episode_id`, `person_id`, `role` — 551 rows |
+| `episodes.original_air_date` | ISO date, all 176 |
+| `episodes.us_viewers_millions` | Nielsen figure, 170 of 176 |
+| `episode_credits` | *view* — episode + person + role |
+
+`role` is one of `director`, `writer`, `story`, `teleplay`. Wikipedia
+distinguishes story from teleplay for 85 episodes; for the rest the role is
+plain `writer`.
+
+```sql
+-- What else did the writer of "Darmok" write?
+SELECT DISTINCT ec.season, ec.episode_number, ec.title
+  FROM credits c
+  JOIN episodes ec USING(episode_id)
+ WHERE c.person_id IN (
+       SELECT person_id FROM credits
+        WHERE role != 'director'
+          AND episode_id = (SELECT episode_id FROM episodes WHERE title='Darmok'))
+   AND ec.title != 'Darmok'
+ ORDER BY ec.season, ec.episode_number;
+```
+
+Only facts are stored — names, dates, numbers. Wikipedia's episode summaries
+are its authors' prose and are deliberately not copied.
+
+## No built-in notion of "similar"
+
+The schema stores facts and stops there. What makes two episodes similar
+depends entirely on the question — same writer, same director, overlapping
+cast, shared subject, comparable audience — and those give genuinely different
+answers. For "Darmok":
+
+| Definition | Top matches |
+|---|---|
+| Same writer | Emergence, Masks, Interface, Suspicions, The Chase |
+| Same director | Rightful Heir, Man of the People, Birthright pt 1 |
+| Similar cast mix | Where Silence Has Lease, Contagion, The Royale |
+| Shared keywords | The Child, Skin of Evil |
+
+Writer is the strongest of these and shared keywords the weakest — a term that
+appears in only one episode, like `Tamarian`, can never be shared, so the
+sharpest markers in the taxonomy are exactly the ones that cannot drive
+similarity. Rather than freeze one definition into a view, state the one you
+want at query time and join accordingly.
 
 ## The keyword taxonomy
 

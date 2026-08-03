@@ -5,6 +5,7 @@
 #   1. download every TNG transcript from chakoteya.net into "Season N" dirs
 #   2. parse those transcripts into the SQLite line-count database
 #   3. count the keywords.py terms per episode into the same database
+#   4. add credits, air dates and viewership from Wikipedia
 #
 # All three steps are safe to re-run. The downloader skips transcripts already
 # on disk, and both database builds upsert rather than starting over, so an
@@ -80,7 +81,7 @@ fi
 echo "  requests and beautifulsoup4 present"
 
 for script in download_tng_transcripts.py build_line_counts.py \
-              build_keywords.py keywords.py; do
+              build_keywords.py build_credits.py keywords.py; do
     if [[ ! -f "$script" ]]; then
         echo "Error: $script not found in $HERE" >&2
         exit 1
@@ -124,6 +125,16 @@ echo
 
 "$PYTHON" build_keywords.py \
     --transcripts-dir "$TRANSCRIPTS_DIR" \
+    --db-path "$DB_PATH" \
+    ${REBUILD_ARGS[@]+"${REBUILD_ARGS[@]}"}
+
+# ---------------------------------------------------------------------------
+# Step 4: credits (needs the episodes rows from step 2)
+# ---------------------------------------------------------------------------
+step "Adding credits, air dates and viewership"
+echo
+
+"$PYTHON" build_credits.py \
     --db-path "$DB_PATH" \
     ${REBUILD_ARGS[@]+"${REBUILD_ARGS[@]}"}
 
